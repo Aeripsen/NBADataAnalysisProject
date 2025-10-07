@@ -19,5 +19,3 @@ rmarkdown::render("Final_project_code.Rmd",
 )
 ````
 
-```
-
