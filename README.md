@@ -19,17 +19,5 @@ rmarkdown::render("Final_project_code.Rmd",
 )
 ````
 
-## View Online
-
-After pushing to GitHub, enable **GitHub Pages** → Branch: `main`, Folder: `/docs`
-Then open:
-`https://<username>.github.io/<repo-name>/`
-
-## Notes
-
-* Add `.nojekyll` inside `docs/` for GitHub Pages.
-* PDF knitting requires `latex_engine: xelatex` and `tinytex`.
-
-```
 ```
 
