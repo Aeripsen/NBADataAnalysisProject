@@ -1,4 +1,4 @@
-````markdown
+
 # STA302 Final Project — NBA Salary Analysis
 
 Analysis of NBA player salaries using data from  
