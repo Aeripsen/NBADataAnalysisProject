@@ -1,0 +1,815 @@
+---
+title: "STA302 Final Project"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(MASS)
+library(car)
+library(lmtest)
+```
+
+## 1. Data Import & Cleaning
+
+We start by loading the raw NBA data and inspecting its first rows.
+
+```{r data_import}
+# Read nba_final.csv
+nba <- read.csv("nba_final.csv", stringsAsFactors = FALSE)
+head(nba)
+```
+
+```{r sample-size, echo=FALSE}
+n <- nrow(nba)               # 1408 before cleaning
+cat("Initial sample size (n):", n)
+```
+
+Next, we compute a table showing how many NAs each variable has.
+
+```{r missing_data_summary}
+# Compute missing data summary table
+missing_summary <- data.frame(
+  Variable = names(nba),
+  Missing_Count = sapply(nba, function(x) sum(is.na(x))),
+  Total_Count = nrow(nba)
+)
+missing_summary$Missing_Percent <- round(100 * missing_summary$Missing_Count / missing_summary$Total_Count, 2)
+missing_summary <- missing_summary[missing_summary$Missing_Count > 0, ]
+missing_summary <- missing_summary[order(-missing_summary$Missing_Count), ]
+
+# Print the missing data summary
+knitr::kable(missing_summary, caption = "Missing Data Summary (sorted by count)")
+```
+
+We found that Pos2 had too many missing values (99.15%), so we dropped it. We also removed 62 rows (4.40%) with missing Salary values, but kept all other variables since they had reasonable amounts of missing data (≤ 28.69%).
+
+```{r data_cleaning}
+# Check for missing values using base R
+missing_cols <- colSums(is.na(nba))
+
+# Drop variables with > 90% missing values
+missing_threshold <- 0.9 * nrow(nba)
+high_missing_cols <- names(missing_cols[missing_cols > missing_threshold])
+cat("Columns with >90% missing values:", paste(high_missing_cols, collapse=", "), "\n")
+
+if (length(high_missing_cols) > 0) {
+  nba <- nba[, !names(nba) %in% high_missing_cols]
+}
+
+# Convert categorical variables to factors
+nba$Pos1 <- as.factor(nba$Pos1)
+nba$Conference <- as.factor(nba$Conference)
+nba$Role <- as.factor(nba$Role)
+nba$Play <- as.factor(nba$Play)
+
+# Remove rows with missing Salary
+nba <- nba[!is.na(nba$Salary), ]
+
+# Show table of remaining NAs and a glimpse summary
+remaining_nas <- colSums(is.na(nba))
+na_df <- data.frame(
+  Variable = names(remaining_nas[remaining_nas > 0]),
+  Missing_Count = remaining_nas[remaining_nas > 0],
+  Percentage = round(100 * remaining_nas[remaining_nas > 0] / nrow(nba), 2)
+)
+knitr::kable(na_df, caption = "Remaining missing values")
+
+# Glimpse of the data using dplyr
+glimpse(nba)
+```
+
+## 2. Exploratory Analysis
+
+Let's first look at the distribution of player salaries.
+
+```{r salary_hist}
+# Histogram of Salary
+ggplot(nba, aes(x = Salary)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of NBA Player Salaries", x = "Salary ($)", y = "Count") +
+  theme_minimal()
+```
+
+To get a quick overview of relationships between variables, we create a scatterplot matrix of our core numeric variables.
+
+```{r pairs_plot}
+# Create pairs scatterplot matrix of core numeric variables
+core_vars <- c("Salary", "MP", "PTS", "TRB", "AST", "STL", "BLK", "PF")
+core_vars <- core_vars[core_vars %in% names(nba)]
+pairs(nba[, core_vars], 
+      main = "Scatterplot Matrix of Core Variables", 
+      pch = 16, 
+      col = "steelblue", 
+      cex = 0.5)
+```
+
+We want to examine how each key stat relates to player salary, so we create individual scatterplots with trend lines.
+
+```{r scatterplots}
+# Scatterplots of Salary vs core stats
+# MP
+ggplot(nba, aes(x = MP, y = Salary)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Salary vs. Minutes Played (MP)", 
+       x = "Minutes Played", 
+       y = "Salary ($)",
+       caption = "Linear relationship assessment between MP and Salary") +
+  theme_minimal()
+
+# PTS
+ggplot(nba, aes(x = PTS, y = Salary)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Salary vs. Points (PTS)", 
+       x = "Points", 
+       y = "Salary ($)",
+       caption = "Linear relationship assessment between PTS and Salary") +
+  theme_minimal()
+
+# TRB
+ggplot(nba, aes(x = TRB, y = Salary)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Salary vs. Total Rebounds (TRB)", 
+       x = "Total Rebounds", 
+       y = "Salary ($)",
+       caption = "Linear relationship assessment between TRB and Salary") +
+  theme_minimal()
+
+# AST
+ggplot(nba, aes(x = AST, y = Salary)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Salary vs. Assists (AST)", 
+       x = "Assists", 
+       y = "Salary ($)",
+       caption = "Linear relationship assessment between AST and Salary") +
+  theme_minimal()
+```
+
+To check for potential multicollinearity, we create a correlation heatmap and table.
+
+```{r correlation}
+# Correlation matrix/heatmap using ggplot2
+cor_vars <- c("Salary", "MP", "PTS", "TRB", "AST", "STL", "BLK", "PF")
+cor_vars <- cor_vars[cor_vars %in% names(nba)]
+
+# Calculate correlation matrix (handling NAs)
+cor_matrix <- cor(nba[, cor_vars], use = "pairwise.complete.obs")
+
+# Convert to tidy data format for ggplot
+cor_tidy <- as.data.frame(as.table(cor_matrix))
+names(cor_tidy) <- c("Var1", "Var2", "Correlation")
+
+# Create correlation heatmap with ggplot2
+ggplot(cor_tidy, aes(x = Var1, y = Var2, fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1)) +
+  geom_text(aes(label = round(Correlation, 2)), color = "black", size = 3) +
+  theme_minimal() +
+  labs(title = "Correlation Matrix of Key Variables",
+       caption = "Identifies multicollinearity among predictors") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Also create a correlation table
+knitr::kable(round(cor_matrix, 2), caption = "Correlation Matrix")
+```
+
+Our correlation analysis revealed some concerning relationships. Minutes Played (MP) is strongly correlated with Points (PTS) at r = 0.88 and with Steals (STL) at r = 0.76. These high correlations could cause multicollinearity problems in our models, which is why we'll use mean-centering in the next section.
+
+## 3. Transformations & Diagnostics
+
+```{r mod_raw_model, echo=TRUE}
+# 1. Fit raw (un-transformed) model
+mod_raw <- lm(
+  Salary ~ MP + PTS + TRB + AST + STL + BLK + PF + Play,
+  data = nba
+)
+summary(mod_raw)
+```
+
+```{r diag_plots_mod_raw, fig.width=8, fig.height=8, echo=FALSE}
+# Diagnostics for mod_raw
+par(mfrow = c(2,2))
+plot(mod_raw, which = 1, main = "Residuals vs Fitted (mod_raw)")
+plot(mod_raw, which = 2, main = "Normal Q–Q (mod_raw)")
+plot(mod_raw, which = 3, main = "Scale–Location (mod_raw)")
+plot(mod_raw, which = 4, main = "Cook's Distance (mod_raw)")
+par(mfrow = c(1,1))
+```
+
+First, we apply the Box-Cox procedure to find the optimal transformation for Salary.
+
+```{r boxcox}
+# Run Box-Cox on Salary ~ core stats
+bc_model <- lm(Salary ~ MP + PTS + TRB + AST + STL + BLK + PF + Play, data = nba)
+bc_result <- MASS::boxcox(bc_model, plotit=FALSE)
+lambda <- bc_result$x[which.max(bc_result$y)]
+cat("Optimal Box-Cox lambda:", lambda, "\n")
+
+# Create log10(Salary) if lambda ≈ 0
+nba$logSalary <- log10(nba$Salary)
+```
+
+```{r center_predictors_first}
+# Center numeric predictors first
+nba$MP_c <- scale(nba$MP, center = TRUE, scale = FALSE)
+nba$PTS_c <- scale(nba$PTS, center = TRUE, scale = FALSE)
+nba$TRB_c <- scale(nba$TRB, center = TRUE, scale = FALSE)
+nba$AST_c <- scale(nba$AST, center = TRUE, scale = FALSE)
+nba$STL_c <- scale(nba$STL, center = TRUE, scale = FALSE)
+nba$BLK_c <- scale(nba$BLK, center = TRUE, scale = FALSE)
+
+# Create additional terms
+nba$MP_c2 <- nba$MP_c^2
+nba$MP_c_PTS_c <- nba$MP_c * nba$PTS_c
+nba$MP_c_AST_c <- nba$MP_c * nba$AST_c
+```
+
+```{r mod_init_model, echo=TRUE}
+# 2. Fit log10-transformed model
+mod_init <- lm(
+  log10(Salary) ~ MP_c + PTS_c + TRB_c + AST_c + STL_c + BLK_c + Play,
+  data = nba
+)
+summary(mod_init)
+```
+
+```{r diag_plots_mod_init, fig.width=8, fig.height=8, echo=FALSE}
+# Diagnostics for mod_init
+par(mfrow = c(2,2))
+plot(mod_init, which = 1, main = "Residuals vs Fitted (mod_init)")
+plot(mod_init, which = 2, main = "Normal Q–Q (mod_init)")
+plot(mod_init, which = 3, main = "Scale–Location (mod_init)")
+plot(mod_init, which = 4, main = "Cook's Distance (mod_init)")
+par(mfrow = c(1,1))
+```
+
+```{r salary-dist, fig.cap="Original vs log₁₀(Salary) distributions", echo=FALSE}
+salary_data <- data.frame(
+  value = c(nba$Salary, nba$logSalary),
+  type  = rep(c("Original","log₁₀"), each=nrow(nba))
+)
+ggplot(salary_data, aes(value, fill=type)) +
+  geom_histogram(bins=30, alpha=0.6, position="identity") +
+  facet_wrap(~type, scales="free") +
+  labs(x="", y="Count")
+```
+
+```{r boxcox-plot, fig.cap="Box–Cox log-likelihood vs λ", echo=FALSE}
+plot(bc_result$x, bc_result$y, type="l",
+     xlab=expression(lambda), ylab="Log-likelihood")
+abline(v=lambda, col="red", lty=2)
+```
+
+λ≈0.26 is near zero, so we log₁₀-transform salary. This makes the distribution much more normal.
+
+Next, we already centered our predictors and created interaction terms to reduce multicollinearity.
+
+We centered all our core stats (MP, PTS, TRB, AST, STL, BLK) to reduce multicollinearity. We also added a squared term for Minutes Played and two interaction terms to capture potential non-linear relationships.
+
+Let's compare the original and transformed salary distributions.
+
+<!-- We already have a salary distribution plot earlier in the document -->
+
+Now we fit our initial model using the centered predictors and transformed response.
+
+```{r fit_mod_init}
+# Fit mod_init
+mod_init <- lm(logSalary ~ MP_c + PTS_c + TRB_c + AST_c + STL_c + BLK_c + Play, data = nba)
+summary(mod_init)
+```
+
+```{r leverage-check, echo=FALSE}
+lev_cut <- 2 * length(coef(mod_init)) / nrow(nba)
+high_lev <- sum(hatvalues(mod_init) > lev_cut)
+cat("Leverage cutoff:", round(lev_cut,4),
+    "— Obs above cutoff:", high_lev)
+```
+
+```{r mod_init-coefs, echo=FALSE}
+library(broom)
+tidy(mod_init, conf.int=TRUE) %>%
+  knitr::kable(caption="mod_init coefficients (95% CI)")
+```
+
+```{r diag-plots, fig.cap="Residuals vs Fitted & Normal Q–Q", fig.width=8, fig.height=4, echo=FALSE}
+par(mfrow=c(1,2))
+plot(mod_init, which=1, main="Residuals vs Fitted")
+plot(mod_init, which=2, main="Normal Q–Q")
+par(mfrow=c(1,1))
+```
+
+Our initial model shows that several predictors (PTS_c, AST_c, STL_c, BLK_c, PlayYes) aren't significant at the 0.05 level. We'll keep them in our models anyway because they're important basketball metrics.
+
+Let's check for multicollinearity using Variance Inflation Factors (VIF).
+
+```{r vif_table}
+# VIF table
+vif_values <- vif(mod_init)
+knitr::kable(data.frame(
+  Variable = names(vif_values),
+  VIF = vif_values
+), caption = "Variance Inflation Factors - Check for multicollinearity")
+```
+
+Our VIF analysis shows moderate collinearity for MP_c (7.26) and PTS_c (6.65), but they're below our threshold of 10. However, we found that in our interaction model, the MP_c×PTS_c term has a VIF of 11.69, which is too high. This warns us against over-complicating our model.
+
+Next, we examine residual plots to check model assumptions.
+
+```{r residual_plots}
+# Residual plots for heteroskedasticity and normality checks
+# We already have diagnostic plots earlier in the document
+
+# Store fitted values and residuals for later use
+fitted_values <- fitted(mod_init)
+residuals <- residuals(mod_init)
+```
+
+We also create component-plus-residual plots to check for linearity in each predictor's relationship with the response.
+
+```{r component_residual_plots}
+# Component+Residual plots for checking linearity assumptions
+crPlots(mod_init, terms = ~ MP_c + PTS_c + TRB_c + AST_c + STL_c + BLK_c,
+        main = "Component+Residual Plots",
+        caption = "Check for linearity in the relationship between each predictor and response")
+```
+
+To understand each predictor's effect while controlling for others, we create added-variable plots.
+
+```{r added_variable_plots}
+# Added-Variable plots to visualize each predictor's partial effect
+avPlots(mod_init, terms = ~ MP_c + PTS_c + TRB_c + AST_c + STL_c + BLK_c,
+        main = "Added-Variable Plots",
+        caption = "Visualize partial effects of each predictor controlling for others")
+```
+
+Finally, we identify influential observations using Cook's distance.
+
+```{r cooks_d_plot}
+# Calculate Cook's distance
+cooksd <- cooks.distance(mod_init)
+cutoff <- 4/nrow(nba)
+
+# Create a data frame for plotting
+cooksd_df <- data.frame(
+  obs = 1:length(cooksd),
+  cooksd = cooksd
+)
+
+```{r cooks-bar, fig.cap="Cook's distance for mod_init", echo=FALSE}
+ggplot(cooksd_df, aes(obs, cooksd)) +
+  geom_col(fill="steelblue") +
+  geom_hline(yintercept=cutoff, linetype="dashed", color="red") +
+  labs(x="Observation", y="Cook's D")
+```
+```
+
+We identify and remove influential observations to create a cleaner dataset.
+
+```{r identify_influential}
+# Flag influential observations
+cooksd <- cooks.distance(mod_init)
+cutoff <- 4/nrow(nba)
+infl_obs <- which(cooksd > cutoff)
+cat("Found", length(infl_obs), "influential observations (Cook's D >", round(cutoff, 4), ")\n")
+
+# Create table of top 10 influential observations
+top_infl <- head(sort(cooksd, decreasing = TRUE), 10)
+infl_df <- data.frame(
+  Observation = as.integer(names(top_infl)),
+  Cooks_Distance = top_infl,
+  Std_Residual = rstandard(mod_init)[as.integer(names(top_infl))],
+  Leverage = hatvalues(mod_init)[as.integer(names(top_infl))]
+)
+knitr::kable(infl_df, caption = "Top 10 influential observations")
+
+# Create nba_clean dataset
+nba_clean <- nba[-infl_obs, ]
+```
+
+Our diagnostics identified 37 influential observations with Cook's D > 4/n (0.003). We removed these to create our nba_clean dataset, which we'll use for our "clean" models. Earlier, we also dropped the Pos2 variable entirely since over 99% of its values were missing.
+
+## 4. Model Building & Comparison
+
+First, we define functions for cross-validation and model comparison.
+
+```{r cv_mse_function}
+# Define CV-MSE function
+cv_mse <- function(model, data, k = 10) {
+  set.seed(123)  # For reproducibility
+  
+  # Extract model formula
+  model_formula <- formula(model)
+  
+  # Create folds
+  n <- nrow(data)
+  folds <- sample(rep(1:k, length.out=n))
+  mse_values <- numeric(k)
+  
+  # Perform k-fold CV
+  for (i in 1:k) {
+    # Split data
+    train_data <- data[folds != i, ]
+    test_data <- data[folds == i, ]
+    
+    # Fit model on training data
+    fold_model <- lm(model_formula, data=train_data)
+    
+    # Make predictions and calculate MSE
+    preds <- predict(fold_model, newdata=test_data)
+    mse_values[i] <- mean((test_data$logSalary - preds)^2, na.rm=TRUE)
+  }
+  
+  mean(mse_values)  # Return average MSE
+}
+
+# Define model comparison function
+create_model_comparison <- function(models, data_list) {
+  result <- data.frame(
+    Model = character(),
+    Parameters = integer(),
+    Adj_R2 = numeric(),
+    AIC = numeric(),
+    BIC = numeric(),
+    CV_MSE = numeric(),
+    Max_VIF = numeric(),
+    Mean_VIF = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (i in seq_along(models)) {
+    model <- models[[i]]
+    model_name <- names(models)[i]
+    
+    # Get the data for this model
+    model_data <- data_list[[i]]
+    
+    # Calculate metrics
+    adj_r2 <- summary(model)$adj.r.squared
+    n_params <- length(coef(model))
+    aic_val <- AIC(model)
+    bic_val <- BIC(model)
+    cv_mse_val <- cv_mse(model, model_data)
+    
+    # VIF values
+    vif_vals <- try(vif(model), silent = TRUE)
+    if (!inherits(vif_vals, "try-error")) {
+      if (is.matrix(vif_vals)) {
+        # For models with categorical variables with >2 levels
+        max_vif <- max(vif_vals[, "GVIF"])
+        mean_vif <- mean(vif_vals[, "GVIF"])
+      } else {
+        max_vif <- max(vif_vals)
+        mean_vif <- mean(vif_vals)
+      }
+} else {
+      max_vif <- NA
+      mean_vif <- NA
+    }
+    
+    # Add to results table
+    result <- rbind(result, data.frame(
+      Model = model_name,
+      Parameters = n_params,
+      Adj_R2 = adj_r2,
+      AIC = aic_val,
+      BIC = bic_val,
+      CV_MSE = cv_mse_val,
+      Max_VIF = max_vif,
+      Mean_VIF = mean_vif
+    ))
+  }
+  
+  # Sort by CV-MSE (ascending)
+  result <- result[order(result$CV_MSE), ]
+  return(result)
+}
+```
+
+Now we define eight different models to compare - four using the full dataset and four using the cleaned dataset.
+
+```{r define_models}
+# Define the eight models
+# M1_Base - Base model with main effects
+M1_Base <- lm(logSalary ~ MP_c + PTS_c + TRB_c + AST_c + STL_c + BLK_c + Play, data = nba)
+
+# M2_Quad - Adding quadratic term for MP
+M2_Quad <- lm(logSalary ~ MP_c + MP_c2 + PTS_c + TRB_c + AST_c + STL_c + BLK_c + Play, data = nba)
+
+# M3_Interact - Adding interaction terms
+M3_Interact <- lm(logSalary ~ MP_c + PTS_c + TRB_c + AST_c + STL_c + BLK_c + MP_c_PTS_c + MP_c_AST_c + Play, data = nba)
+
+# M4_Full - All terms (quadratic + interactions)
+M4_Full <- lm(logSalary ~ MP_c + MP_c2 + PTS_c + TRB_c + AST_c + STL_c + BLK_c + MP_c_PTS_c + MP_c_AST_c + Play, data = nba)
+
+# Now the same models but on nba_clean data (without influential observations)
+# M5_BaseClean - Base model on cleaned data
+M5_BaseClean <- lm(logSalary ~ MP_c + PTS_c + TRB_c + AST_c + STL_c + BLK_c + Play, data = nba_clean)
+
+# M6_QuadClean - Quadratic model on cleaned data
+M6_QuadClean <- lm(logSalary ~ MP_c + MP_c2 + PTS_c + TRB_c + AST_c + STL_c + BLK_c + Play, data = nba_clean)
+
+# M7_InteractClean - Interaction model on cleaned data
+M7_InteractClean <- lm(logSalary ~ MP_c + PTS_c + TRB_c + AST_c + STL_c + BLK_c + MP_c_PTS_c + MP_c_AST_c + Play, data = nba_clean)
+
+# M8_FullClean - Full model on cleaned data
+M8_FullClean <- lm(logSalary ~ MP_c + MP_c2 + PTS_c + TRB_c + AST_c + STL_c + BLK_c + MP_c_PTS_c + MP_c_AST_c + Play, data = nba_clean)
+```
+
+```{r M1-table, echo=FALSE}
+tidy(M1_Base, conf.int=TRUE) %>%
+  knitr::kable(caption="M1_Base coefficients")
+```
+
+```{r M2-table, echo=FALSE}
+tidy(M2_Quad, conf.int=TRUE) %>%
+  knitr::kable(caption="M2_Quad coefficients")
+```
+
+```{r M3-table, echo=FALSE}
+tidy(M3_Interact, conf.int=TRUE) %>%
+  knitr::kable(caption="M3_Interact coefficients")
+```
+
+```{r M4-table, echo=FALSE}
+tidy(M4_Full, conf.int=TRUE) %>%
+  knitr::kable(caption="M4_Full coefficients")
+```
+
+```{r M5-table, echo=FALSE}
+tidy(M5_BaseClean, conf.int=TRUE) %>%
+  knitr::kable(caption="M5_BaseClean coefficients")
+```
+
+```{r M6-table, echo=FALSE}
+tidy(M6_QuadClean, conf.int=TRUE) %>%
+  knitr::kable(caption="M6_QuadClean coefficients")
+```
+
+```{r M7-table, echo=FALSE}
+tidy(M7_InteractClean, conf.int=TRUE) %>%
+  knitr::kable(caption="M7_InteractClean coefficients")
+```
+
+```{r M8-table, echo=FALSE}
+tidy(M8_FullClean, conf.int=TRUE) %>%
+  knitr::kable(caption="M8_FullClean coefficients")
+```
+
+After comparing all our models, we found that M6_QuadClean offers the best balance of accuracy and simplicity. It has 9 parameters, a CV-MSE of 0.2054, a maximum VIF of 8.69, and an adjusted R² of 0.4613. This model includes a quadratic term for Minutes Played but avoids the multicollinearity issues of the interaction terms.
+
+```{r model_analysis}
+# Create a list of models and corresponding datasets
+models <- list(
+  "M1_Base" = M1_Base,
+  "M2_Quad" = M2_Quad,
+  "M3_Interact" = M3_Interact,
+  "M4_Full" = M4_Full,
+  "M5_BaseClean" = M5_BaseClean,
+  "M6_QuadClean" = M6_QuadClean, 
+  "M7_InteractClean" = M7_InteractClean,
+  "M8_FullClean" = M8_FullClean
+)
+
+data_list <- list(
+  nba, nba, nba, nba, 
+  nba_clean, nba_clean, nba_clean, nba_clean
+)
+
+# Function to analyze and print model results
+analyze_model <- function(model, name, data) {
+  cat("\n## Model:", name, "\n")
+  
+  # Summary
+  summary_model <- summary(model)
+  print(summary_model)
+  
+  # VIF
+  vif_vals <- vif(model)
+  cat("\nMaximum VIF:", max(vif_vals), "\n")
+  cat("Mean VIF:", mean(vif_vals), "\n")
+  
+  # CV-MSE
+  cv_mse_val <- cv_mse(model, data)
+  cat("10-fold CV-MSE:", cv_mse_val, "\n\n")
+}
+
+# Analyze each model
+for (i in seq_along(models)) {
+  analyze_model(models[[i]], names(models)[i], data_list[[i]])
+}
+```
+
+We create a comparison table to easily compare all models based on key metrics.
+
+```{r model_comparison}
+# Create model comparison table
+comparison_table <- create_model_comparison(models, data_list)
+knitr::kable(comparison_table[, c("Model", "Parameters", "Adj_R2", "AIC", "BIC", "CV_MSE")], 
+     caption = "Model Comparison Table (sorted by CV-MSE)",
+     digits = 4)
+```
+
+```{r cvmse-plot, fig.cap="CV-MSE comparison", echo=FALSE}
+ggplot(comparison_table, aes(reorder(Model, CV_MSE), CV_MSE)) +
+  geom_col() + coord_flip()
+```
+
+```{r adjr2-plot, fig.cap="Adjusted R² comparison", echo=FALSE}
+ggplot(comparison_table, aes(reorder(Model, -Adj_R2), Adj_R2)) +
+  geom_col() + coord_flip()
+```
+
+```{r params-plot, fig.cap="Number of parameters", echo=FALSE}
+ggplot(comparison_table, aes(reorder(Model, -Parameters), Parameters)) +
+  geom_col() + coord_flip()
+```
+
+Finally, we visualize the comparison metrics to help us select the best model.
+
+```{r comparison_plots}
+# We have flipped coordinate plots earlier in the document
+```
+
+## 5. Comprehensive Model Diagnostics
+
+```{r diag_all10, fig.width=8, fig.height=8, echo=FALSE}
+# List all 10 models
+model_list <- list(
+  mod_raw          = mod_raw,
+  mod_init         = mod_init,
+  M1_Base          = M1_Base,
+  M2_Quad          = M2_Quad,
+  M3_Interact      = M3_Interact,
+  M4_Full          = M4_Full,
+  M5_BaseClean     = M5_BaseClean,
+  M6_QuadClean     = M6_QuadClean,
+  M7_InteractClean = M7_InteractClean,
+  M8_FullClean     = M8_FullClean
+)
+
+for(name in names(model_list)) {
+  mod <- model_list[[name]]
+  par(mfrow = c(2,2))
+  plot(mod, which = 1, main = paste("Residuals vs Fitted —", name))
+  plot(mod, which = 2, main = paste("Normal Q–Q —", name))
+  plot(mod, which = 3, main = paste("Scale–Location —", name))
+  plot(mod, which = 4, main = paste("Cook's Distance —", name))
+  par(mfrow = c(1,1))
+}
+```
+
+## 4.x Additional Diagnostics for Model Selection
+
+```{r section4_additional_diagnostics, warning=FALSE, message=FALSE, fig.height=6, fig.width=8}
+library(car)
+library(ggplot2)
+library(lmtest)
+
+# 1. Fit raw (un-transformed) model
+mod_raw <- lm(
+  Salary ~ MP + PTS + TRB + AST + STL + BLK + PF + Play,
+  data = nba
+)
+summary(mod_raw)
+
+# 2×2 diagnostic grid for mod_raw
+par(mfrow = c(2, 2))
+plot(mod_raw, which = 1, main = "Residuals vs Fitted (mod_raw)")
+plot(mod_raw, which = 2, main = "Normal Q–Q (mod_raw)")
+plot(mod_raw, which = 3, main = "Scale–Location (mod_raw)")
+plot(mod_raw, which = 4, main = "Cook's Distance (mod_raw)")
+par(mfrow = c(1, 1))
+
+# 2. Fit log10-transformed model
+mod_init <- lm(
+  log10(Salary) ~ MP_c + PTS_c + TRB_c + AST_c + STL_c + BLK_c + Play,
+  data = nba
+)
+summary(mod_init)
+
+# 2×2 diagnostic grid for mod_init
+par(mfrow = c(2, 2))
+plot(mod_init, which = 1, main = "Residuals vs Fitted (mod_init)")
+plot(mod_init, which = 2, main = "Normal Q–Q (mod_init)")
+plot(mod_init, which = 3, main = "Scale–Location (mod_init)")
+plot(mod_init, which = 4, main = "Cook's Distance (mod_init)")
+par(mfrow = c(1, 1))
+
+# 3. Breusch-Pagan test for heteroskedasticity
+bp_raw <- bptest(mod_raw)
+bp_init <- bptest(mod_init)
+cat("Breusch-Pagan test p-value (raw model):", format.pval(bp_raw$p.value, digits = 3), "\n")
+cat("Breusch-Pagan test p-value (transformed model):", format.pval(bp_init$p.value, digits = 3), "\n")
+
+# 4. Residual QQ plots comparison
+par(mfrow = c(1, 2))
+qqnorm(residuals(mod_raw), main = "QQ Plot - Raw Model")
+qqline(residuals(mod_raw), col = "red")
+qqnorm(residuals(mod_init), main = "QQ Plot - Log-Transformed Model")
+qqline(residuals(mod_init), col = "red")
+par(mfrow = c(1, 1))
+
+# 5. Residuals vs Fitted values comparison
+par(mfrow = c(1, 2))
+plot(fitted(mod_raw), residuals(mod_raw), 
+     main = "Residuals vs Fitted (Raw Model)",
+     xlab = "Fitted values", ylab = "Residuals",
+     pch = 16, col = "blue", cex = 0.7)
+abline(h = 0, col = "red", lty = 2)
+plot(fitted(mod_init), residuals(mod_init), 
+     main = "Residuals vs Fitted (Log Model)",
+     xlab = "Fitted values", ylab = "Residuals",
+     pch = 16, col = "blue", cex = 0.7)
+abline(h = 0, col = "red", lty = 2)
+par(mfrow = c(1, 1))
+
+# 6. Component+Residual plots for mod_init
+crPlots(mod_init, terms = ~ MP_c + PTS_c + TRB_c + AST_c,
+        main = "Component+Residual Plots (Log-Transformed Model)")
+
+# 7. Added-Variable plots for mod_init
+avPlots(mod_init, terms = ~ MP_c + PTS_c + TRB_c + AST_c,
+        main = "Added-Variable Plots (Log-Transformed Model)")
+
+# 8. Standardized residuals vs leverage
+par(mfrow = c(1, 2))
+plot(hatvalues(mod_raw), rstandard(mod_raw),
+     main = "Std. Residuals vs Leverage (Raw Model)",
+     xlab = "Leverage", ylab = "Standardized Residuals",
+     pch = 16, col = "blue", cex = 0.7)
+abline(h = c(-2, 0, 2), col = "red", lty = c(2, 1, 2))
+plot(hatvalues(mod_init), rstandard(mod_init),
+     main = "Std. Residuals vs Leverage (Log Model)",
+     xlab = "Leverage", ylab = "Standardized Residuals",
+     pch = 16, col = "blue", cex = 0.7)
+abline(h = c(-2, 0, 2), col = "red", lty = c(2, 1, 2))
+par(mfrow = c(1, 1))
+
+# 9. Cook's distance comparison
+par(mfrow = c(1, 2))
+cooksd_raw <- cooks.distance(mod_raw)
+cooksd_init <- cooks.distance(mod_init)
+cutoff <- 4/nrow(nba)
+plot(cooksd_raw, type = "h", 
+     main = "Cook's Distance (Raw Model)",
+     ylab = "Cook's Distance", xlab = "Observation")
+abline(h = cutoff, col = "red", lty = 2)
+plot(cooksd_init, type = "h", 
+     main = "Cook's Distance (Log Model)",
+     ylab = "Cook's Distance", xlab = "Observation")
+abline(h = cutoff, col = "red", lty = 2)
+par(mfrow = c(1, 1))
+
+# 10. Scale-Location plots comparison
+par(mfrow = c(1, 2))
+plot(fitted(mod_raw), sqrt(abs(rstandard(mod_raw))),
+     main = "Scale-Location Plot (Raw Model)",
+     xlab = "Fitted values", 
+     ylab = "√|Standardized residuals|",
+     pch = 16, col = "blue", cex = 0.7)
+lines(lowess(fitted(mod_raw), sqrt(abs(rstandard(mod_raw)))), col = "red")
+plot(fitted(mod_init), sqrt(abs(rstandard(mod_init))),
+     main = "Scale-Location Plot (Log Model)",
+     xlab = "Fitted values", 
+     ylab = "√|Standardized residuals|",
+     pch = 16, col = "blue", cex = 0.7)
+lines(lowess(fitted(mod_init), sqrt(abs(rstandard(mod_init)))), col = "red")
+par(mfrow = c(1, 1))
+```
+
+### Residual Diagnostics Analysis
+
+1. **Raw Model vs Log-Transformed Model**
+   - The raw model shows severe heteroskedasticity with residuals fanning out at higher fitted values.
+   - The log-transformed model greatly improves residual homoskedasticity.
+   - QQ plots show the log transformation produces more normally distributed residuals.
+
+2. **Heteroskedasticity Tests**
+   - Breusch-Pagan test confirms significant heteroskedasticity in the raw model (p < 0.001).
+   - Log transformation reduces but doesn't completely eliminate heteroskedasticity.
+
+3. **Influential Observations**
+   - Cook's distance plots identify more extreme influential points in the raw model.
+   - Log transformation reduces the influence of high-salary observations.
+
+4. **Linearity Assessment**
+   - Component-residual plots show improved linearity in the log-transformed model.
+   - Some non-linearity remains in the relationships with key predictors.
+
+5. **Leverage Points**
+   - Both models have observations with high leverage.
+   - The log transformation reduces the impact of these high-leverage points.
+
+6. **Overall Assessment**
+   - The log transformation substantially improves model diagnostics.
+   - Removing influential observations (as done in our clean models) further improves model fit.
+   - The quadratic term for Minutes Played helps address remaining non-linearity.
+
